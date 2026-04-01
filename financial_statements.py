@@ -1,7 +1,9 @@
+import pandas as pd
+import matplotlib.pyplot as plt
 import requests
 import yfinance as yf
 
-security = yf.ticker("MU")
+security = yf.Ticker("INTC")
 
 # Can't access SEC data without this
 headers = {
@@ -31,7 +33,6 @@ def get_cik(security, headers=headers):
 # Now, we fetch
 
 def get_financial_statements(cik, headers=headers):
-    cik = get_cik(security, headers)
     if cik is None:
         return None
     url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
@@ -40,7 +41,7 @@ def get_financial_statements(cik, headers=headers):
     data = response.json()
     return data
 
-company_facts = get_financial_statements(get_cik(security, headers), headers)
+company_facts = get_financial_statements(get_cik("INTC", headers), headers)
 
 # 1: We want the accounts data, which can be found in either "us-gaap" or "ifrs-full".
 # 2: We want only annual data, filtering by form type [10-K, 20-F, 40-F, 10-K/A, 20-F/A, 40-F/A].
@@ -65,11 +66,16 @@ def extract_account_data(company_facts, account_name):
                 for f in company_facts["facts"][rule][account_name]["units"][currency]:
                     if f["form"] in form_types:
                         if "end" in f and f["end"] is not None:
-                            if five_years_ago <= f["end"] <= current_day:
+                            if five_years_ago <= datetime.strptime(f["end"], "%Y-%m-%d").date() <= current_day:
                                 account_data[f["end"]] = f'{f["val"]} ({currency})'
     return account_data
 
-{}
+def latest_value(account_name):
+    account_data = extract_account_data(company_facts, account_name)
+    if not account_data:
+        return None
+    latest_date = max(account_data.keys())
+    return float(account_data[latest_date].split(" ")[0])
 
 # Forming the balance sheet 
 balance_sheet = {
@@ -128,10 +134,37 @@ balance_sheet = {
     "TOTAL_LIABILITIES_AND_STOCKHOLDERS_EQUITY": extract_account_data(company_facts, "LiabilitiesAndStockholdersEquity")
 }
 
+balance_sheet_df = pd.DataFrame(balance_sheet).T
+
+# Revenue reporting can be very inconsistent across companies, so we have to check multiple tags.
+REVENUE_TAGS = [
+    "Revenues",
+    "RevenueFromContractWithCustomerExcludingAssessedTax",
+    "SalesRevenueNet",
+    "SalesRevenueGoodsNet",
+    "SalesRevenueServicesNet"
+]
+
+def get_total_revenue(facts):
+    for tag in REVENUE_TAGS:
+        for rule in ["us-gaap", "ifrs-full"]:
+            if rule in facts["facts"] and tag in facts["facts"][rule]:
+                data = extract_account_data(facts, tag)
+                if data:
+                    return data
+    return None
+
+def latest_revenue():
+    data = get_total_revenue(company_facts)
+    if not data:
+        return None
+    latest_date = max(data.keys())
+    return float(data[latest_date].split(" ")[0])
+
 # Forming the income statement
 income_statement = {
     # Going from the top line to the bottom line, first subtracting COGS from sales to get gross profit.
-    "sales": extract_account_data(company_facts, "SalesRevenueNet"),
+    "revenues": get_total_revenue(company_facts),
     "cost_of_goods_sold": extract_account_data(company_facts, "CostOfGoodsSold"),
     "gross_profit": extract_account_data(company_facts, "GrossProfit"),
     # Now, we subtract operating expenses (Depreciation & Amortization, SG&A, R&D) from gross profit to get operating income (EBIT).
@@ -167,6 +200,8 @@ income_statement = {
     "noncontrolling_interest_net_income_loss": extract_account_data(company_facts, "NetIncomeLossAttributableToNoncontrollingInterest"),
     "common_stockholders_net_income_loss": extract_account_data(company_facts, "NetIncomeLossAvailableToCommonStockholders")
 }
+
+income_statement_df = pd.DataFrame(income_statement).T
 
 # Forming the cash flow statement
 cash_flow_statement = {
@@ -205,39 +240,103 @@ cash_flow_statement = {
     "net_change_in_cash": extract_account_data(company_facts, "CashAndCashEquivalentsPeriodIncreaseDecrease")
 }
 
+cash_flow_statement_df = pd.DataFrame(cash_flow_statement).T
+
 # Now that the financial statements are ready, we can calculate important metrics for the LAST YEAR and determine the viability of an investment in this stock.
 # We have already calculated some of these, but we will initialize them here once more. 
 
+def safe_divide(a, b):
+    if a is None or b is None or b == 0:
+        return None
+    return a / b
+
 key_metrics = {
-    "net_income": income_statement["net_income"],
-    "EBIT": income_statement["operating_income_or_ebit"],
-    "EBITDA": income_statement["operating_income_or_ebit"] + income_statement["depreciation_and_amortization"],
-    "Depreciation": income_statement["depreciation"],
-    "Amortization": income_statement["amortization"],
+    "net_income": latest_value("NetIncomeLoss"),
+    "EBIT": latest_value("OperatingIncomeLoss"),
+    "EBITDA": (latest_value("OperatingIncomeLoss") or 0) + (latest_value("Depreciation") or 0)  + (latest_value("AmortizationOfIntangibleAssets") or 0),
+    "Depreciation": latest_value("Depreciation"),
+    "Amortization": latest_value("AmortizationOfIntangibleAssets"),
     # Basic EPS = Net Income - Preferred Dividends/ Weighted Avg Common Shares Outstanding
     # Weighted Avg Common Shares Outstanding = (Beginning Common Shares Outstanding + Ending Common Shares Outstanding) / 2
-    "Basic Earnings Per Share (EPS)": (income_statement["net_income"][-1] - extract_account_data(company_facts, "DividendsPreferredStock")[-1])/((extract_account_data(company_facts, "WeightedAverageNumberOfSharesOutstandingBasic")[-1])),
+    "Basic Earnings Per Share (EPS)": safe_divide((latest_value("NetIncomeLoss") - (latest_value("DividendsPreferredStock") or 0)), (latest_value("WeightedAverageNumberOfSharesOutstandingBasic") or 1)),
     # Diluted EPS = Net Income - Preferred Dividends/ Weighted Avg Common Shares Outstanding + Dilutive Potential Common Shares
-    "Diluted Earnings Per Share (EPS)": (income_statement["net_income"][-1] - extract_account_data(company_facts, "DividendsPreferredStock")[-1])/((extract_account_data(company_facts, "WeightedAverageNumberOfDilutedSharesOutstanding")[-1])),
+    "Diluted Earnings Per Share (EPS)": safe_divide((latest_value("NetIncomeLoss") - (latest_value("DividendsPreferredStock") or 0)), (latest_value("WeightedAverageNumberOfDilutedSharesOutstanding") or 1)),
     # We use Diluted EPS to calculate P/E ratio. 
     # It must be noted that the P/E ratio continually changes as the stock price changes and is semi-periodic. 
-    "Trailing P/E": security.fast_info["last_price"] / (income_statement["net_income"][-1] - extract_account_data(company_facts, "DividendsPreferredStock")[-1])/((extract_account_data(company_facts, "WeightedAverageNumberOfDilutedSharesOutstanding")[-1])),
-    "ROE": income_statement["net_income"][-1] / extract_account_data(company_facts, "StockholdersEquity")[-1],
-    "Interest Coverage Ratio": (income_statement["operating_income_or_ebit"][-1] / income_statement["interest_expense"][-1]), 
-    "Operating Margin": income_statement["operating_income_or_ebit"][-1] / income_statement["sales"][-1]
+    "Trailing P/E": safe_divide(security.fast_info["last_price"], safe_divide((latest_value("NetIncomeLoss") - (latest_value("DividendsPreferredStock") or 0)), (latest_value("WeightedAverageNumberOfDilutedSharesOutstanding") or 1))),
+    "ROE": safe_divide(latest_value("NetIncomeLoss"), latest_value("StockholdersEquity")),
+    "Interest Coverage Ratio": safe_divide(latest_value("OperatingIncomeLoss"), latest_value("InterestExpense")),
+    "Operating Margin": safe_divide(latest_value("OperatingIncomeLoss"), latest_revenue())
 }
 
+key_metrics_df = pd.Series(key_metrics).T
 
+def yoy_growth(account_name):
+    if account_name == "Revenue":
+        data = get_total_revenue(company_facts)
+    else:
+        data = extract_account_data(company_facts, account_name)
+    if not data or len(data) < 2:
+        return None
+    sorted_dates = sorted(data.keys())
+    current = float(data[sorted_dates[-1]].split(" ")[0])
+    prior = float(data[sorted_dates[-2]].split(" ")[0])
+    return safe_divide((current - prior), abs(prior)) 
 
+def eps_yoy_growth():
+    ni = extract_account_data(company_facts, "NetIncomeLossAvailableToCommonStockholders")
+    shares = extract_account_data(company_facts, "WeightedAverageNumberOfDilutedSharesOutstanding")
+    if not ni:
+        ni = extract_account_data(company_facts, "NetIncomeLoss")
+    if not ni or not shares or len(ni) < 2 or len(shares) < 2:
+        return None
+    ni_dates = sorted(ni.keys())
+    sh_dates = sorted(shares.keys())
+    eps_current = safe_divide(float(ni[ni_dates[-1]].split(" ")[0]), float(shares[sh_dates[-1]].split(" ")[0]))
+    eps_prior = safe_divide(float(ni[ni_dates[-2]].split(" ")[0]), float(shares[sh_dates[-2]].split(" ")[0]))
+    return safe_divide((eps_current - eps_prior), abs(eps_prior))
 
+def margin_change(numerator_tag, denominator_tag):
+    data_n = extract_account_data(company_facts, numerator_tag)
+    data_d = extract_account_data(company_facts, denominator_tag)
+    if not data_n or not data_d or len(data_n) < 2 or len(data_d) < 2:
+        return None
+    n_dates = sorted(data_n.keys())
+    d_dates = sorted(data_d.keys())
+    margin_current = safe_divide(float(data_n[n_dates[-1]].split(" ")[0]), float(data_d[d_dates[-1]].split(" ")[0]))
+    margin_prior = safe_divide(float(data_n[n_dates[-2]].split(" ")[0]), float(data_d[d_dates[-2]].split(" ")[0]))
+    return safe_divide((margin_current - margin_prior), abs(margin_prior))
 
+def ebitda_yoy_growth():
+    ebit = extract_account_data(company_facts, "OperatingIncomeLoss")
+    da = extract_account_data(company_facts, "Depreciation")
+    if not ebit or not da or len(ebit) < 2 or len(da) < 2:
+        return None
+    ebit_dates = sorted(ebit.keys())
+    da_dates = sorted(da.keys())
+    ebitda_current = float(ebit[ebit_dates[-1]].split(" ")[0]) + float(da[da_dates[-1]].split(" ")[0])
+    ebitda_prior = float(ebit[ebit_dates[-2]].split(" ")[0]) + float(da[da_dates[-2]].split(" ")[0])
+    return safe_divide((ebitda_current - ebitda_prior), abs(ebitda_prior))
 
+yoy_growth_rates = {
+    "Revenue Growth": yoy_growth("Revenue"),
+    "Gross Profit Growth": yoy_growth("GrossProfit"), 
+    "Net Income Growth": yoy_growth("NetIncomeLoss"),
+    "EBIT Growth": yoy_growth("OperatingIncomeLoss"),
+    "EBITDA Growth": ebitda_yoy_growth(),
+    "ROE Growth": margin_change("NetIncomeLoss", "StockholdersEquity"),
+    "EPS Growth": eps_yoy_growth(),  # EPS growth is essentially net income growth, since the number of shares outstanding doesn't change much year over year.
+    "R&D Growth": yoy_growth("ResearchAndDevelopmentExpense"),
+    "Operating Cash Flow Growth": yoy_growth("NetCashProvidedByUsedInOperatingActivities")
+}
+yoy_growth_rates_df = pd.Series(yoy_growth_rates).T
 
+pd.set_option('display.float_format', lambda x: f'{x:,.0f}')
+pd.set_option('display.max_columns', 10)
+pd.set_option('display.width', 120)
 
-
-
-
-
-    
+print(key_metrics_df)
+print(yoy_growth_rates_df)
+ 
 
 
