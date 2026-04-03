@@ -38,6 +38,19 @@ def get_company_facts(ticker, headers=headers):
     response = requests.get(url, headers=headers)
     return response.json()
 
+def get_company_sic(ticker, headers=headers):
+    cik = get_cik(ticker, headers)
+    if cik is None:
+        return None
+    
+    url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+    response = requests.get(url, headers=headers)
+    sic = response.json().get("sic", None)
+    
+    if not sic:
+        return None
+    
+    return int(sic)
 
 def extract_account_data(company_facts, account_name, years=5):
     if company_facts is None:

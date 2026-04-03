@@ -5,7 +5,7 @@ import numpy as np
 import math
 import re
 import datetime
-from financial_statement_pipeline.data import get_company_facts, extract_account_data
+from financial_statement_pipeline.data import get_company_facts, extract_account_data, get_company_sic
 
 
 def extract_company_account_data(company_facts, account_name, year):
@@ -34,39 +34,6 @@ archetypes = [
     "Pharma" # high margins, high R&D
 ]
 
-def missing(x):
-    return x is None or (isinstance(x, float) and math.isnan(x))
-
-def to_number(x):
-    if x is None:
-        return None
-
-    if isinstance(x, (int, float)):
-        return float(x)
-
-    if isinstance(x, str):
-        x = x.strip()
-
-        match = re.search(r'-?\d+(?:,\d{3})*(?:\.\d+)?', x)
-        if not match:
-            return None
-
-        num_str = match.group(0).replace(",", "")
-        return float(num_str)
-
-    return None
-
-def safe_div(a, b):
-    a = to_number(a)
-    b = to_number(b)
-
-    if a is None or b is None or b == 0:
-        return None
-    return a / b
-
-def sigmoid(x):
-    return 1 / (1 + np.exp(-x))
-
 def extract_with_fallback(company_facts, tag_list, year):
     for tag in tag_list:
         value = extract_company_account_data(company_facts, tag, year)
@@ -77,120 +44,86 @@ def extract_with_fallback(company_facts, tag_list, year):
 # First, we will create rules to filter obvious archetypes. 
 # We start with banks.
 
-# Interest income and revenues have a lot of variation in how they are tagged.
-
-INTEREST_INCOME_TAGS = [
-    "InterestAndDividendIncomeOperating",
-    "InterestIncome",
-    "InterestIncomeOperating",
-    "InterestAndFeeIncomeLoans",
-]
-
-REVENUE_TAGS = [
-    "Revenues",
-    "RevenuesNetOfInterestExpense",
-    "RevenueFromContractWithCustomerExcludingAssessedTax",
-    "SalesRevenueNet",
-    "SalesRevenueGoodsNet",
-    "SalesRevenueServicesNet"
-]
-
 def is_bank(ticker, year):
     company_facts = get_company_facts(ticker)
 
-    print()
-    # Interest Income / Revenue
-    interest_income_ratio = safe_div(extract_with_fallback(company_facts, INTEREST_INCOME_TAGS, year), extract_with_fallback(company_facts, REVENUE_TAGS, year))
-    print(f"Interest Income Ratio: {interest_income_ratio}")
-    if interest_income_ratio is None:
-        print(f"interest_income: {extract_with_fallback(company_facts, INTEREST_INCOME_TAGS, year)}, revenue: {extract_with_fallback(company_facts, REVENUE_TAGS, year)}")
-    # Deposits / Liabilities
-    deposits_to_liabilities_ratio = safe_div(extract_company_account_data(company_facts, "Deposits", year), extract_company_account_data(company_facts, "Liabilities", year))
-    print(f"Deposits to Liabilities Ratio: {deposits_to_liabilities_ratio}")
-    # Leverage (Assets / Equity)
-    leverage = safe_div(extract_company_account_data(company_facts, "Assets", year), extract_company_account_data(company_facts, "StockholdersEquity", year))
-    print(f"Leverage: {leverage}")
-
-    if (
-    missing(interest_income_ratio) or
-    missing(deposits_to_liabilities_ratio) or
-    missing(leverage)
-):
-        print(False)
-        return False
-    
-    else:
-        
-        score = score = (
-        3 * interest_income_ratio +
-        2 * deposits_to_liabilities_ratio +
-        1 * leverage
+    interest_fees_loans = extract_company_account_data(
+        company_facts, "InterestAndFeeIncomeLoansAndLeases", year
     )
 
-        p_bank = sigmoid(score - 3)
-        print(f"{ticker} - Bank Score: {score:.2f}, P(Bank): {p_bank:.2f}")
+    noninterest_expense = extract_company_account_data(
+        company_facts, "NoninterestExpense", year
+    )
 
-        print(p_bank > 0.7)
-        return p_bank > 0.7
+    interest_dividend_operating = extract_company_account_data(
+        company_facts, "InterestAndDividendIncomeOperating", year
+    )
+
+    result = (
+        interest_fees_loans is not None
+        or (noninterest_expense is not None and interest_dividend_operating is not None)
+    )
+
+    print(f"{ticker}:{result}")
+    return result
 
 # We follow with real estate companies.
 
-REAL_ESTATE_TAGS = [
-    "RealEstateInvestmentsNet",
-    "RealEstateInvestmentPropertyNet",
-    "InvestmentPropertyNet"
-]
-
-PROPERTY_REIT_TAGS = [
-    "RealEstateInvestmentsNet",
-    "RealEstateInvestmentPropertyNet",
-    "InvestmentPropertyNet"
-]
-
-INFRASTRUCTURE_ASSET_TAGS = [
-    "PropertyPlantAndEquipmentNet"
-]
-
-def is_reit(ticker, year):
-    company_facts = get_company_facts(ticker)
-
-    assets = extract_company_account_data(company_facts, "Assets", year)
-    revenue = extract_with_fallback(company_facts, REVENUE_TAGS, year)
-    equity = extract_company_account_data(company_facts, "StockholdersEquity", year)
-
-    property_assets = extract_with_fallback(company_facts, PROPERTY_REIT_TAGS, year)
-    infrastructure_assets = extract_with_fallback(company_facts, INFRASTRUCTURE_ASSET_TAGS, year)
-
-    property_asset_ratio = safe_div(property_assets, assets)
-    infrastructure_asset_ratio = safe_div(infrastructure_assets, assets)
-    asset_to_revenue_ratio = safe_div(assets, revenue)
-    leverage = safe_div(assets, equity)
-
-    print(f"Property Asset Ratio: {property_asset_ratio}")
-    print(f"Infrastructure Asset Ratio: {infrastructure_asset_ratio}")
-    print(f"Asset to Revenue Ratio: {asset_to_revenue_ratio}")
-    print(f"Leverage: {leverage}")
-
-    # Classic property REITs: PLD, SPG, O, PSA, AVB, etc.
-    property_reit = (
-        not missing(property_asset_ratio) and property_asset_ratio > 0.5 and
-        not missing(asset_to_revenue_ratio) and asset_to_revenue_ratio > 4
-    )
-
-    # Infrastructure REITs: AMT, EQIX, DLR-like names
-    infrastructure_reit = (
-        missing(property_asset_ratio) and
-        not missing(infrastructure_asset_ratio) and infrastructure_asset_ratio > 0.5 and
-        not missing(asset_to_revenue_ratio) and asset_to_revenue_ratio > 3 and
-        not missing(leverage) and leverage > 1.5
-    )
-
-    result = property_reit or infrastructure_reit
-    print(result)
+def is_REIT(ticker, year):
+    result = get_company_sic(ticker) == 6798
+    print(f"{ticker}: {result}")
     return result
 
-is_reit("PLD", 2022)   # Prologis (industrial/logistics)
-is_reit("AMT", 2022)   # American Tower (cell towers)
-is_reit("EQIX", 2022)  # Equinix (data centers)
-is_reit("SPG", 2022)   # Simon Property (malls)
-is_reit("O", 2022)     # Realty Income (net lease)
+# Next, identify insurance companies.
+
+def is_insurance(ticker, year):
+    company_facts = get_company_facts(ticker)
+
+    premiums = extract_company_account_data(company_facts, "PremiumsEarnedNet", year)
+    
+    result = premiums is not None
+    print(f"{ticker}:{result}")
+    return result
+
+# Business development companies, closed-end funds, and ETFs.
+
+
+
+# Special purpose acquisition companies.
+
+def is_SPAC(ticker, year):
+    result = get_company_sic(ticker) == 6770
+    print(f"{ticker}: {result}")
+    return result
+
+# Master limited partnerships.
+
+def is_MLP(ticker, year):
+    # MLPs have no dedicated SIC, identify via partnership-specific XBRL tag
+    company_facts = get_company_facts(ticker)
+    result = bool(extract_account_data(company_facts, "LimitedPartnersCapitalAccount"))
+    print(f"{ticker}: {result}")
+    return result
+
+# Biotech companies.
+
+def is_biotech(ticker, year):
+    result = get_company_sic(ticker) in [2834, 2835, 2836, 8731]
+    print(f"{ticker}: {result}")
+    return result
+
+# Mining, exploration companies.
+
+def is_mining(ticker, year):
+    result = get_company_sic(ticker) == 1040
+    print(f"{ticker}: {result}")
+    return result
+
+# Utilities.
+
+def is_utility(ticker, year):
+    result = get_company_sic(ticker) in [4813, 4911, 4924, 4931]
+    print(f"{ticker}: {result}")
+    return result
+
+

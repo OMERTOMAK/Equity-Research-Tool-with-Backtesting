@@ -33,14 +33,4 @@ def get_last_year_for_tag_raw(company_facts, tag):
     return max(years) if years else None
 
 if __name__ == "__main__":
-    print(find_tags(get_company_facts("WFC"), "Revenues"))
-    print(find_tags(get_company_facts("GS"), "Revenues"))
-    print(find_tags(get_company_facts("MS"), "Revenues"))
-
-    print(get_last_year_for_tag_raw(get_company_facts("WFC"), "Revenues"))
-    print(get_last_year_for_tag_raw(get_company_facts("GS"), "Revenues"))
-    print(get_last_year_for_tag_raw(get_company_facts("MS"), "Revenues"))
-
-    print(get_last_year_for_tag_raw(get_company_facts("WFC"), "RevenuesNetOfInterestExpense"))
-    print(get_last_year_for_tag_raw(get_company_facts("GS"), "RevenuesNetOfInterestExpense"))
-    print(get_last_year_for_tag_raw(get_company_facts("MS"), "RevenuesNetOfInterestExpense"))
+    print(get_last_year_for_tag_raw(get_company_facts("MU"), "RealEstateInvestmentPropertyNet"))
