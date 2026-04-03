@@ -1,129 +1,166 @@
 # We have to segment companies based on their financial behavior, which we will define using financial archetypes.
-# We will use K-means clustering to identify these archetypes based on key financial metrics. This segmentation will allow us to build more tailored predictive models for each group, improving our ability to forecast stock performance relative to the S&P 500.
+# Two companies have the same financial archetype if their standard metrics are compatible.
 
-import numpy as np
-import math
-import re
-import datetime
-from financial_statement_pipeline.data import get_company_facts, extract_account_data, get_company_sic
+# First we will hardcode some financial archetypes using SIC numbers and XBRL tags.
+# Them, we will use K-means clustering on the remainder of companies to determine their financial archetypes.
 
+from financial_statement_pipeline.data import get_company_facts, get_company_sic, REVENUE_TAGS
+from financial_statement_pipeline.tag_finder import get_last_year_for_tag_raw, get_last_value_for_tag
 
-def extract_company_account_data(company_facts, account_name, year):
-    account_data = extract_account_data(company_facts, account_name)
+# Hardcoding companies with incompatible standard metrics
+ARCHETYPE_SIC_MAP = {
+    "Bank": [
+        6021, 6022, 6029,
+        6035, 6036,
+        6099,
+        6111, 6141, 6153, 6159, 6162, 6163, 6172,
+        6189, 6199,
+    ],
+    "Brokerage": [
+        6200, 6211, 6221,
+        6282,
+    ],
+    "Insurance": [
+        6311, 6321, 6324, 6331,
+        6351, 6361, 6399,
+        6411,
+    ],
+    "REIT": [
+        6798,
+    ],
+    "BDC": [
+        6726,
+    ],
+    "Pre-revenue Biotech": [
+        2835, 2836, 8731,
+    ],
+    "Exclude": [
+        6770, 8888, 9721, 9995, 6799,
+    ],
+}
 
-    for date, value in account_data.items():
-        if datetime.datetime.strptime(date, "%Y-%m-%d").year == year:
-            return value
-
-    return None
-
-# Defining archetypes 
-archetypes = [
-    "Software/SaaS", # High GM, low CapEx, high R&D
-    "Platform/Marketplace", # High GM, low inventory
-    "Fabless Semiconductor", # High GM, low CapEx, high R&D
-    "IDM Semiconductor/Foundry", # Moderate GM, high CapEx
-    "Industrial Manufacturing", # Moderate GM, high CapEx, high inventory
-    "Commodity Production", # Low GM, high CapEx, volatile margins
-    "Retailer", # Low GM, high inventory, high inventory turnover
-    "Consumer Brand", # Moderate GM, high SG&A expenses
-    "Bank", # Interest income reliant 
-    "Insurance", # Premiums reliant, Reserves reliant
-    "Real Estate/Yield", # High assets, rental income reliant, FFO reliant
-    "Biotech", # high R&D, negative earnings preprofit
-    "Pharma" # high margins, high R&D
+# Letting K-means cluster companies with compatible standard metrics
+archetypes_kmeans = [
+    "Software/SaaS",
+    "Platform/Marketplace",
+    "Fabless Semiconductor",
+    "IDM Semiconductor/Foundry",
+    "Industrial Manufacturing",
+    "Commodity Production",      # mining, oil & gas will likely cluster here
+    "Retailer",
+    "Consumer Brand",
+    "Pharma",
+    "Telecom",
+    "Healthcare Services",
+    "Media/Entertainment",
+    # utilities will either cluster alone or near industrials — let data decide
 ]
 
-def extract_with_fallback(company_facts, tag_list, year):
+# Check that a company has an XBRL tag in a list of XBRL tags.
+def extract_with_fallback(company_facts, tag_list):
     for tag in tag_list:
-        value = extract_company_account_data(company_facts, tag, year)
+        value = get_last_value_for_tag(company_facts, tag)  # should be this
         if value is not None:
             return value
     return None
 
-# First, we will create rules to filter obvious archetypes. 
-# We start with banks.
+MLP_TAGS = [
+    "LimitedPartnersCapitalAccount",
+    "PartnersCapital",
+]
 
-def is_bank(ticker, year):
+BDC_TAGS = [
+    "InvestmentOwnedAtFairValue",
+    "NetInvestmentIncome",
+]
+
+RD_TAGS = [
+    "ResearchAndDevelopmentExpense",
+    "ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost",
+]
+
+
+def get_archetype(ticker, year):
+    sic = get_company_sic(ticker)
+
+    for archetype, sic_list in ARCHETYPE_SIC_MAP.items():
+        if sic in sic_list:
+            if archetype == "Pre-revenue Biotech":
+                break  # fall through to revenue check below
+            print(f"{ticker}: {archetype}")
+            return archetype
+        
     company_facts = get_company_facts(ticker)
 
-    interest_fees_loans = extract_company_account_data(
-        company_facts, "InterestAndFeeIncomeLoansAndLeases", year
-    )
+    # MLP fallback
+    if any(
+        get_last_year_for_tag_raw(company_facts, tag) is not None
+        and get_last_year_for_tag_raw(company_facts, tag) >= year - 2
+        for tag in MLP_TAGS
+    ):
+        print(f"{ticker}: MLP")
+        return "MLP"
 
-    noninterest_expense = extract_company_account_data(
-        company_facts, "NoninterestExpense", year
-    )
+    # BDC fallback
+    if extract_with_fallback(company_facts, BDC_TAGS) is not None:
+        print(f"{ticker}: BDC")
+        return "BDC"
 
-    interest_dividend_operating = extract_company_account_data(
-        company_facts, "InterestAndDividendIncomeOperating", year
-    )
+    # Pre-revenue biotech
+    if sic in [2835, 2836, 8731]:
+        revenue = extract_with_fallback(company_facts, REVENUE_TAGS)
+        rd = extract_with_fallback(company_facts, RD_TAGS)
+        if revenue is None or (rd is not None and rd > revenue):
+            print(f"{ticker}: Pre-revenue Biotech")
+            return "Pre-revenue Biotech"
 
-    result = (
-        interest_fees_loans is not None
-        or (noninterest_expense is not None and interest_dividend_operating is not None)
-    )
+    print(f"{ticker}: Standard")
+    return "Standard"
 
-    print(f"{ticker}:{result}")
-    return result
+if __name__ == "__main__":
+    year = 2024
 
-# We follow with real estate companies.
+    # Banks
+    print(get_archetype("JPM", year))
+    print(get_archetype("BAC", year))
+    print(get_archetype("WFC", year))
 
-def is_REIT(ticker, year):
-    result = get_company_sic(ticker) == 6798
-    print(f"{ticker}: {result}")
-    return result
+    # Brokerages
+    print(get_archetype("GS", year))
+    print(get_archetype("MS", year))
+    print(get_archetype("SCHW", year))
 
-# Next, identify insurance companies.
+    # Insurance
+    print(get_archetype("BRK-B", year))
+    print(get_archetype("PGR", year))
+    print(get_archetype("MET", year))
 
-def is_insurance(ticker, year):
-    company_facts = get_company_facts(ticker)
+    # REITs
+    print(get_archetype("PLD", year))
+    print(get_archetype("AMT", year))
+    print(get_archetype("EQIX", year))
 
-    premiums = extract_company_account_data(company_facts, "PremiumsEarnedNet", year)
-    
-    result = premiums is not None
-    print(f"{ticker}:{result}")
-    return result
+    # BDCs
+    print(get_archetype("ARCC", year))
+    print(get_archetype("MAIN", year))
 
-# Business development companies, closed-end funds, and ETFs.
+    # MLPs
+    print(get_archetype("ET", year))
+    print(get_archetype("EPD", year))
+    print(get_archetype("MPLX", year))
 
+    # Pre-revenue Biotech
+    print(get_archetype("BEAM", year))
+    print(get_archetype("CRSP", year))
+    print(get_archetype("FATE", year))
 
+    # Standard Biotech with revenue (should be Standard)
+    print(get_archetype("BIIB", year))
+    print(get_archetype("MRNA", year))
 
-# Special purpose acquisition companies.
-
-def is_SPAC(ticker, year):
-    result = get_company_sic(ticker) == 6770
-    print(f"{ticker}: {result}")
-    return result
-
-# Master limited partnerships.
-
-def is_MLP(ticker, year):
-    # MLPs have no dedicated SIC, identify via partnership-specific XBRL tag
-    company_facts = get_company_facts(ticker)
-    result = bool(extract_account_data(company_facts, "LimitedPartnersCapitalAccount"))
-    print(f"{ticker}: {result}")
-    return result
-
-# Biotech companies.
-
-def is_biotech(ticker, year):
-    result = get_company_sic(ticker) in [2834, 2835, 2836, 8731]
-    print(f"{ticker}: {result}")
-    return result
-
-# Mining, exploration companies.
-
-def is_mining(ticker, year):
-    result = get_company_sic(ticker) == 1040
-    print(f"{ticker}: {result}")
-    return result
-
-# Utilities.
-
-def is_utility(ticker, year):
-    result = get_company_sic(ticker) in [4813, 4911, 4924, 4931]
-    print(f"{ticker}: {result}")
-    return result
-
-
+    # Standard
+    print(get_archetype("AAPL", year))
+    print(get_archetype("MSFT", year))
+    print(get_archetype("AMZN", year))
+    print(get_archetype("OKE", year))
+    print(get_archetype("KMI", year))
