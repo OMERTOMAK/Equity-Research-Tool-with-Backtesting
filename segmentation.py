@@ -5,7 +5,7 @@
 # Them, we will use K-means clustering on the remainder of companies to determine their financial archetypes.
 
 from financial_statement_pipeline.data import get_company_facts, get_company_sic, REVENUE_TAGS
-from financial_statement_pipeline.tag_finder import get_last_year_for_tag_raw, get_last_value_for_tag
+from financial_statement_pipeline.tag_finder import get_last_year_for_tag_raw, get_last_value_for_tag, find_tags
 
 # Hardcoding companies with incompatible standard metrics
 ARCHETYPE_SIC_MAP = {
@@ -58,8 +58,10 @@ archetypes_kmeans = [
 
 # Check that a company has an XBRL tag in a list of XBRL tags.
 def extract_with_fallback(company_facts, tag_list):
+    if company_facts is None:
+        return None
     for tag in tag_list:
-        value = get_last_value_for_tag(company_facts, tag)  # should be this
+        value = get_last_value_for_tag(company_facts, tag)
         if value is not None:
             return value
     return None
@@ -117,50 +119,77 @@ def get_archetype(ticker, year):
     print(f"{ticker}: Standard")
     return "Standard"
 
-if __name__ == "__main__":
-    year = 2024
+features = [
+    "gross_margin_pct",      # discriminates Software vs Retailer vs Commodity
+    "operating_margin_pct",  # discriminates profitable vs not
+    "rd_pct_revenue",        # discriminates Pharma/Semi/Software vs everyone else
+    "sga_pct_revenue",       # discriminates Consumer Brand vs Industrial
+    "capex_ev",              # discriminates capital intensive vs asset light
+    "asset_turnover",        # discriminates Retailer vs Industrial vs Software
+    "inventory_pct_revenue", # discriminates physical goods vs services
+]
 
-    # Banks
-    print(get_archetype("JPM", year))
-    print(get_archetype("BAC", year))
-    print(get_archetype("WFC", year))
 
-    # Brokerages
-    print(get_archetype("GS", year))
-    print(get_archetype("MS", year))
-    print(get_archetype("SCHW", year))
+GROSS_PROFIT_TAGS = ["GrossProfit"]
 
-    # Insurance
-    print(get_archetype("BRK-B", year))
-    print(get_archetype("PGR", year))
-    print(get_archetype("MET", year))
+COST_OF_REVENUE_TAGS = [
+    "CostOfRevenue",
+    "CostOfGoodsAndServicesSold",
+    "CostOfGoodsSold",
+    "CostOfServices",
+    "FoodAndBeverageCostOfSales",
+]
 
-    # REITs
-    print(get_archetype("PLD", year))
-    print(get_archetype("AMT", year))
-    print(get_archetype("EQIX", year))
+OPERATING_INCOME_TAGS = [
+    "OperatingIncomeLoss",
+    "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+] # 97% coverage 
 
-    # BDCs
-    print(get_archetype("ARCC", year))
-    print(get_archetype("MAIN", year))
+RD_TAGS = [
+    "ResearchAndDevelopmentExpense"
+] # 100% coverage
 
-    # MLPs
-    print(get_archetype("ET", year))
-    print(get_archetype("EPD", year))
-    print(get_archetype("MPLX", year))
+SGA_TAGS = [
+    "SellingGeneralAndAdministrativeExpense",
+    "SellingAndMarketingExpense",
+    "GeneralAndAdministrativeExpense",
+] # 93% coverage
 
-    # Pre-revenue Biotech
-    print(get_archetype("BEAM", year))
-    print(get_archetype("CRSP", year))
-    print(get_archetype("FATE", year))
+CAPEX_TAGS = [
+    "PaymentsToAcquirePropertyPlantAndEquipment",
+    "PaymentsToAcquireProductiveAssets",
+    "PaymentsToAcquireOilAndGasPropertyAndEquipment",
+] # 97% coveage
 
-    # Standard Biotech with revenue (should be Standard)
-    print(get_archetype("BIIB", year))
-    print(get_archetype("MRNA", year))
+ASSET_TAGS = [
+    "Assets"
+] # 100% coverage
 
-    # Standard
-    print(get_archetype("AAPL", year))
-    print(get_archetype("MSFT", year))
-    print(get_archetype("AMZN", year))
-    print(get_archetype("OKE", year))
-    print(get_archetype("KMI", year))
+NET_INVENTORY_TAGS = [
+    "InventoryNet"
+] # 100% coverage
+
+
+tickers = [
+    # Mega cap tech
+    "AAPL", "MSFT", "GOOG", "META", "AMZN", "NFLX", "CRM", "ADBE", "NOW", "SNOW",
+    # Semiconductors
+    "NVDA", "AMD", "INTC", "QCOM", "AVGO", "MU", "AMAT", "KLAC", "LRCX", "TXN",
+    # Industrial
+    "GE", "HON", "MMM", "CAT", "DE", "EMR", "ETN", "PH", "ROK", "ITW",
+    # Consumer/Retail
+    "WMT", "TGT", "COST", "HD", "LOW", "NKE", "SBUX", "MCD", "YUM", "CMG",
+    # Energy
+    "XOM", "CVX", "COP", "SLB", "HAL", "PSX", "VLO", "MPC", "OXY", "EOG",
+    # Healthcare/Pharma
+    "JNJ", "PFE", "MRK", "ABBV", "LLY", "BMY", "AMGN", "GILD", "REGN", "VRTX",
+    # Financials (standard only)
+    "BLK", "SPGI", "MCO", "ICE", "CME", "CBOE", "MSCI", "FDS", "BR", "TW",
+    # Media/Telecom
+    "DIS", "CMCSA", "T", "VZ", "CHTR", "PARA", "WBD", "FOXA", "OMC", "IPG",
+    # Consumer brands
+    "PG", "KO", "PEP", "CL", "EL", "CHD", "CLX", "KMB", "SJM", "HRL",
+    # Aerospace/Defense
+    "LMT", "RTX", "NOC", "GD", "BA", "TDG", "HII", "L", "LDOS", "SAIC",
+]
+

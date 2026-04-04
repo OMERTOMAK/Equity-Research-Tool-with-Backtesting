@@ -51,11 +51,4 @@ def get_last_value_for_tag(company_facts, tag):
     return best[1] if best else None
 
 if __name__ == "__main__":
-    print(get_last_year_for_tag_raw(get_company_facts("MPLX"), "PartnersCapital"))
-    print(get_last_year_for_tag_raw(get_company_facts("PAA"), "PartnersCapital"))
-    print(get_last_year_for_tag_raw(get_company_facts("DKL"), "PartnersCapital"))
-
-# And verify it doesn't create false positives on negatives
-    print(get_last_year_for_tag_raw(get_company_facts("OKE"), "PartnersCapital"))
-    print(get_last_year_for_tag_raw(get_company_facts("KMI"), "PartnersCapital"))
-    print(get_last_year_for_tag_raw(get_company_facts("AAPL"), "PartnersCapital"))
+    print(find_tags(get_company_facts("WMT"), "gross"))
