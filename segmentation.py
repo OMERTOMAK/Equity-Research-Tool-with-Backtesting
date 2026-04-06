@@ -4,8 +4,9 @@
 # First we will hardcode some financial archetypes using SIC numbers and XBRL tags.
 # Them, we will use K-means clustering on the remainder of companies to determine their financial archetypes.
 
-from financial_statement_pipeline.data import get_company_facts, get_company_sic, REVENUE_TAGS
-from financial_statement_pipeline.tag_finder import get_last_year_for_tag_raw, get_last_value_for_tag, find_tags
+from datetime import datetime 
+from financial_statement_pipeline.data import get_company_facts, get_company_sic, REVENUE_TAGS, FORM_TYPES
+from financial_statement_pipeline.tag_finder import get_last_year_for_tag_raw, get_last_value_for_tag, find_tags, get_value_for_tag_and_year
 
 # Hardcoding companies with incompatible standard metrics
 ARCHETYPE_SIC_MAP = {
@@ -129,16 +130,34 @@ features = [
     "inventory_pct_revenue", # discriminates physical goods vs services
 ]
 
-
-GROSS_PROFIT_TAGS = ["GrossProfit"]
-
-COST_OF_REVENUE_TAGS = [
-    "CostOfRevenue",
-    "CostOfGoodsAndServicesSold",
-    "CostOfGoodsSold",
-    "CostOfServices",
-    "FoodAndBeverageCostOfSales",
-]
+def get_revenue_growth(company_facts):
+    for tag in REVENUE_TAGS:
+        for rule in ["us-gaap", "ifrs-full"]:
+            if rule in company_facts["facts"] and tag in company_facts["facts"][rule]:
+                units = company_facts["facts"][rule][tag]["units"]
+                for unit, observations in units.items():
+                    annual = []
+                    for o in observations:
+                        if o.get("form") in FORM_TYPES and o.get("end") and o.get("start"):
+                            start = datetime.strptime(o["start"], "%Y-%m-%d")
+                            end = datetime.strptime(o["end"], "%Y-%m-%d")
+                            days = (end - start).days
+                            if 340 <= days <= 390:  # full year only
+                                annual.append(o)
+                    
+                    # Deduplicate by end date
+                    seen = {}
+                    for o in annual:
+                        if o["end"] not in seen:
+                            seen[o["end"]] = o
+                    
+                    annual = sorted(seen.values(), key=lambda x: x["end"], reverse=True)
+                    
+                    if len(annual) >= 2:
+                        if annual[1]["val"] == 0:
+                            return None
+                        return (annual[0]["val"] - annual[1]["val"]) / annual[1]["val"]
+    return None
 
 OPERATING_INCOME_TAGS = [
     "OperatingIncomeLoss",
@@ -193,3 +212,5 @@ tickers = [
     "LMT", "RTX", "NOC", "GD", "BA", "TDG", "HII", "L", "LDOS", "SAIC",
 ]
 
+print(get_last_year_for_tag_raw(get_company_facts("ETN"), "Revenues"))
+print(get_last_year_for_tag_raw(get_company_facts("VLO"), "Revenues"))
